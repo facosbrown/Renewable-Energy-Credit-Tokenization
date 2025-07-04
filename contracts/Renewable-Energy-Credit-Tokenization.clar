@@ -6,6 +6,10 @@
 (define-constant ERR_CREDIT_NOT_FOUND (err u104))
 (define-constant ERR_CREDIT_ALREADY_RETIRED (err u105))
 (define-constant ERR_INVALID_ENERGY_TYPE (err u106))
+(define-constant ERR_AUDITOR_NOT_FOUND (err u107))
+(define-constant ERR_ALREADY_VERIFIED (err u108))
+(define-constant ERR_VERIFICATION_FAILED (err u109))
+(define-constant ERR_UNAUTHORIZED_AUDITOR (err u110))
 
 (define-fungible-token renewable-energy-credit)
 
@@ -243,4 +247,139 @@
     )
     u0
   )
+)
+
+
+(define-map verified-auditors
+  { auditor: principal }
+  {
+    name: (string-ascii 50),
+    certification: (string-ascii 30),
+    active: bool,
+    verifications-count: uint
+  }
+)
+
+(define-map credit-verifications
+  { credit-id: uint }
+  {
+    verified: bool,
+    auditor: (optional principal),
+    verification-date: (optional uint),
+    verification-hash: (optional (string-ascii 64)),
+    notes: (optional (string-ascii 200))
+  }
+)
+
+(define-map audit-trail
+  { audit-id: uint }
+  {
+    credit-id: uint,
+    action: (string-ascii 20),
+    actor: principal,
+    timestamp: uint,
+    details: (string-ascii 100)
+  }
+)
+
+(define-data-var next-audit-id uint u1)
+
+(define-public (register-auditor 
+  (auditor principal)
+  (name (string-ascii 50))
+  (certification (string-ascii 30)))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (map-set verified-auditors
+      { auditor: auditor }
+      {
+        name: name,
+        certification: certification,
+        active: true,
+        verifications-count: u0
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (verify-credit 
+  (credit-id uint)
+  (verification-hash (string-ascii 64))
+  (notes (string-ascii 200)))
+  (let
+    (
+      (auditor-info (unwrap! (map-get? verified-auditors { auditor: tx-sender }) ERR_UNAUTHORIZED_AUDITOR))
+      (credit-info (unwrap! (map-get? credit-details { credit-id: credit-id }) ERR_CREDIT_NOT_FOUND))
+      (existing-verification (map-get? credit-verifications { credit-id: credit-id }))
+    )
+    (asserts! (get active auditor-info) ERR_UNAUTHORIZED_AUDITOR)
+    (asserts! (is-none existing-verification) ERR_ALREADY_VERIFIED)
+    
+    (map-set credit-verifications
+      { credit-id: credit-id }
+      {
+        verified: true,
+        auditor: (some tx-sender),
+        verification-date: (some stacks-block-height),
+        verification-hash: (some verification-hash),
+        notes: (some notes)
+      }
+    )
+  
+    (map-set verified-auditors
+      { auditor: tx-sender }
+      (merge auditor-info { verifications-count: (+ (get verifications-count auditor-info) u1) })
+    )
+    
+    (let
+      (
+        (audit-result (record-audit-event credit-id "VERIFIED" tx-sender "Credit verified by auditor"))
+      )
+      (ok true)
+    )
+  )
+)
+
+(define-private (record-audit-event 
+  (credit-id uint)
+  (action (string-ascii 20))
+  (actor principal)
+  (details (string-ascii 100)))
+  (let
+    (
+      (audit-id (var-get next-audit-id))
+    )
+    (map-set audit-trail
+      { audit-id: audit-id }
+      {
+        credit-id: credit-id,
+        action: action,
+        actor: actor,
+        timestamp: stacks-block-height,
+        details: details
+      }
+    )
+    (var-set next-audit-id (+ audit-id u1))
+    (ok audit-id)
+  )
+)
+
+(define-read-only (get-auditor-info (auditor principal))
+  (map-get? verified-auditors { auditor: auditor })
+)
+
+(define-read-only (get-credit-verification (credit-id uint))
+  (map-get? credit-verifications { credit-id: credit-id })
+)
+
+(define-read-only (get-audit-record (audit-id uint))
+  (map-get? audit-trail { audit-id: audit-id })
+)
+
+(define-read-only (is-credit-verified (credit-id uint))
+  (get verified (default-to 
+    { verified: false, auditor: none, verification-date: none, verification-hash: none, notes: none }
+    (map-get? credit-verifications { credit-id: credit-id })
+  ))
 )
