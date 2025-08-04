@@ -11,6 +11,10 @@
 (define-constant ERR_VERIFICATION_FAILED (err u109))
 (define-constant ERR_UNAUTHORIZED_AUDITOR (err u110))
 
+(define-constant ERR_CREDIT_EXPIRED (err u111))
+(define-constant ERR_INVALID_EXPIRATION_PERIOD (err u112))
+(define-constant DEFAULT_EXPIRATION_BLOCKS u144000)
+
 (define-fungible-token renewable-energy-credit)
 
 (define-map energy-producers
@@ -382,4 +386,92 @@
     { verified: false, auditor: none, verification-date: none, verification-hash: none, notes: none }
     (map-get? credit-verifications { credit-id: credit-id })
   ))
+)
+
+
+(define-map expiration-config
+  { energy-type: (string-ascii 20) }
+  { expiration-blocks: uint }
+)
+
+(define-data-var global-expiration-enabled bool true)
+
+(define-public (set-expiration-period 
+  (energy-type (string-ascii 20))
+  (expiration-blocks uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (> expiration-blocks u0) ERR_INVALID_EXPIRATION_PERIOD)
+    (map-set expiration-config
+      { energy-type: energy-type }
+      { expiration-blocks: expiration-blocks }
+    )
+    (ok true)
+  )
+)
+
+(define-public (toggle-expiration-system (enabled bool))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set global-expiration-enabled enabled)
+    (ok true)
+  )
+)
+
+(define-read-only (get-expiration-period (energy-type (string-ascii 20)))
+  (get expiration-blocks 
+    (default-to 
+      { expiration-blocks: DEFAULT_EXPIRATION_BLOCKS }
+      (map-get? expiration-config { energy-type: energy-type })
+    )
+  )
+)
+
+(define-read-only (is-credit-expired (credit-id uint))
+  (if (var-get global-expiration-enabled)
+    (match (map-get? credit-details { credit-id: credit-id })
+      credit-info
+      (let
+        (
+          (expiration-period (get-expiration-period (get energy-type credit-info)))
+          (expiration-block (+ (get generation-date credit-info) expiration-period))
+        )
+        (>= stacks-block-height expiration-block)
+      )
+      true
+    )
+    false
+  )
+)
+
+(define-read-only (get-credit-expiration-block (credit-id uint))
+  (match (map-get? credit-details { credit-id: credit-id })
+    credit-info
+    (let
+      (
+        (expiration-period (get-expiration-period (get energy-type credit-info)))
+      )
+      (some (+ (get generation-date credit-info) expiration-period))
+    )
+    none
+  )
+)
+
+(define-read-only (get-valid-credit-value (credit-id uint))
+  (if (is-credit-expired credit-id)
+    u0
+    (get-credit-value credit-id)
+  )
+)
+
+(define-public (validate-credit-transfer (credit-id uint) (amount uint))
+  (begin
+    (asserts! (not (is-credit-expired credit-id)) ERR_CREDIT_EXPIRED)
+    (asserts! (>= (get-valid-credit-value credit-id) amount) ERR_INVALID_AMOUNT)
+    (ok true)
+  )
+)
+
+(define-read-only (is-expiration-enabled)
+  (var-get global-expiration-enabled)
 )
