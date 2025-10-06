@@ -475,3 +475,120 @@
 (define-read-only (is-expiration-enabled)
   (var-get global-expiration-enabled)
 )
+
+
+(define-map portfolio-tracking
+  { owner: principal }
+  {
+    total-acquired: uint,
+    total-retired: uint,
+    total-spent: uint,
+    acquisition-count: uint,
+    last-activity-block: uint
+  }
+)
+
+(define-map energy-type-holdings
+  { owner: principal, energy-type: (string-ascii 20) }
+  { amount: uint, acquisition-cost: uint }
+)
+
+(define-map purchase-history
+  { owner: principal, purchase-id: uint }
+  {
+    amount: uint,
+    price-paid: uint,
+    energy-type: (string-ascii 20),
+    purchased-at: uint,
+    from-seller: principal
+  }
+)
+
+(define-data-var next-purchase-id uint u1)
+
+(define-public (record-portfolio-activity
+  (amount uint)
+  (price-paid uint)
+  (energy-type (string-ascii 20))
+  (seller principal))
+  (let
+    (
+      (current-portfolio (default-to
+        { total-acquired: u0, total-retired: u0, total-spent: u0, acquisition-count: u0, last-activity-block: u0 }
+        (map-get? portfolio-tracking { owner: tx-sender })))
+      (current-holdings (default-to
+        { amount: u0, acquisition-cost: u0 }
+        (map-get? energy-type-holdings { owner: tx-sender, energy-type: energy-type })))
+      (purchase-id (var-get next-purchase-id))
+    )
+    (map-set portfolio-tracking
+      { owner: tx-sender }
+      {
+        total-acquired: (+ (get total-acquired current-portfolio) amount),
+        total-retired: (get total-retired current-portfolio),
+        total-spent: (+ (get total-spent current-portfolio) price-paid),
+        acquisition-count: (+ (get acquisition-count current-portfolio) u1),
+        last-activity-block: stacks-block-height
+      })
+    
+    (map-set energy-type-holdings
+      { owner: tx-sender, energy-type: energy-type }
+      {
+        amount: (+ (get amount current-holdings) amount),
+        acquisition-cost: (+ (get acquisition-cost current-holdings) price-paid)
+      })
+    
+    (map-set purchase-history
+      { owner: tx-sender, purchase-id: purchase-id }
+      {
+        amount: amount,
+        price-paid: price-paid,
+        energy-type: energy-type,
+        purchased-at: stacks-block-height,
+        from-seller: seller
+      })
+    
+    (var-set next-purchase-id (+ purchase-id u1))
+    (ok purchase-id)
+  )
+)
+
+(define-read-only (get-portfolio-summary (owner principal))
+  (default-to
+    { total-acquired: u0, total-retired: u0, total-spent: u0, acquisition-count: u0, last-activity-block: u0 }
+    (map-get? portfolio-tracking { owner: owner }))
+)
+
+(define-read-only (get-energy-type-holdings (owner principal) (energy-type (string-ascii 20)))
+  (default-to
+    { amount: u0, acquisition-cost: u0 }
+    (map-get? energy-type-holdings { owner: owner, energy-type: energy-type }))
+)
+
+(define-read-only (get-purchase-record (owner principal) (purchase-id uint))
+  (map-get? purchase-history { owner: owner, purchase-id: purchase-id })
+)
+
+(define-read-only (calculate-average-cost (owner principal))
+  (let
+    (
+      (portfolio (get-portfolio-summary owner))
+      (total-acquired (get total-acquired portfolio))
+      (total-spent (get total-spent portfolio))
+    )
+    (if (> total-acquired u0)
+      (/ total-spent total-acquired)
+      u0
+    )
+  )
+)
+
+(define-read-only (get-portfolio-carbon-impact (owner principal))
+  (let
+    (
+      (portfolio (get-portfolio-summary owner))
+      (total-credits (get total-acquired portfolio))
+    )
+    (calculate-carbon-offset total-credits)
+  )
+)
