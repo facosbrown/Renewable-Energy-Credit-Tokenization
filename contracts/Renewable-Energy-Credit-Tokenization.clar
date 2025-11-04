@@ -15,6 +15,16 @@
 (define-constant ERR_INVALID_EXPIRATION_PERIOD (err u112))
 (define-constant DEFAULT_EXPIRATION_BLOCKS u144000)
 
+(define-constant ERR_INVALID_STAKE_AMOUNT (err u113))
+(define-constant ERR_STAKE_NOT_FOUND (err u114))
+(define-constant ERR_STAKE_LOCKED (err u115))
+(define-constant ERR_INVALID_LOCK_PERIOD (err u116))
+
+(define-data-var next-stake-id uint u1)
+(define-data-var reward-rate-basis-points uint u500)
+(define-data-var early-unstake-penalty-rate uint u1000)
+(define-data-var total-staked uint u0)
+
 (define-fungible-token renewable-energy-credit)
 
 (define-map energy-producers
@@ -590,5 +600,139 @@
       (total-credits (get total-acquired portfolio))
     )
     (calculate-carbon-offset total-credits)
+  )
+)
+
+(define-map credit-stakes
+  { stake-id: uint }
+  {
+    staker: principal,
+    amount: uint,
+    stake-start-block: uint,
+    lock-period-blocks: uint,
+    rewards-claimed: uint,
+    active: bool
+  }
+)
+
+(define-map staker-summary
+  { staker: principal }
+  { total-staked: uint, active-stakes-count: uint, lifetime-rewards: uint }
+)
+
+(define-public (stake-credits (amount uint) (lock-period-blocks uint))
+  (let
+    (
+      (stake-id (var-get next-stake-id))
+      (current-balance (ft-get-balance renewable-energy-credit tx-sender))
+      (staker-info (default-to
+        { total-staked: u0, active-stakes-count: u0, lifetime-rewards: u0 }
+        (map-get? staker-summary { staker: tx-sender })))
+    )
+    (asserts! (> amount u0) ERR_INVALID_STAKE_AMOUNT)
+    (asserts! (>= lock-period-blocks u1440) ERR_INVALID_LOCK_PERIOD)
+    (asserts! (>= current-balance amount) ERR_INSUFFICIENT_BALANCE)
+    
+    (try! (ft-burn? renewable-energy-credit amount tx-sender))
+    
+    (map-set credit-stakes
+      { stake-id: stake-id }
+      {
+        staker: tx-sender,
+        amount: amount,
+        stake-start-block: stacks-block-height,
+        lock-period-blocks: lock-period-blocks,
+        rewards-claimed: u0,
+        active: true
+      }
+    )
+    
+    (map-set staker-summary
+      { staker: tx-sender }
+      {
+        total-staked: (+ (get total-staked staker-info) amount),
+        active-stakes-count: (+ (get active-stakes-count staker-info) u1),
+        lifetime-rewards: (get lifetime-rewards staker-info)
+      }
+    )
+    
+    (var-set total-staked (+ (var-get total-staked) amount))
+    (var-set next-stake-id (+ stake-id u1))
+    (ok stake-id)
+  )
+)
+
+(define-public (unstake-credits (stake-id uint))
+  (let
+    (
+      (stake-info (unwrap! (map-get? credit-stakes { stake-id: stake-id }) ERR_STAKE_NOT_FOUND))
+      (unlock-block (+ (get stake-start-block stake-info) (get lock-period-blocks stake-info)))
+      (is-locked (< stacks-block-height unlock-block))
+      (rewards (calculate-stake-rewards stake-id))
+      (staker-info (unwrap! (map-get? staker-summary { staker: tx-sender }) ERR_STAKE_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender (get staker stake-info)) ERR_UNAUTHORIZED)
+    (asserts! (get active stake-info) ERR_STAKE_NOT_FOUND)
+    
+    (let
+      (
+        (penalty (if is-locked (/ (* (get amount stake-info) (var-get early-unstake-penalty-rate)) u10000) u0))
+        (return-amount (+ (- (get amount stake-info) penalty) rewards))
+      )
+      (try! (ft-mint? renewable-energy-credit return-amount tx-sender))
+      
+      (map-set credit-stakes
+        { stake-id: stake-id }
+        (merge stake-info { active: false, rewards-claimed: rewards })
+      )
+      
+      (map-set staker-summary
+        { staker: tx-sender }
+        (merge staker-info {
+          active-stakes-count: (- (get active-stakes-count staker-info) u1),
+          lifetime-rewards: (+ (get lifetime-rewards staker-info) rewards)
+        })
+      )
+      
+      (var-set total-staked (- (var-get total-staked) (get amount stake-info)))
+      (ok return-amount)
+    )
+  )
+)
+
+(define-read-only (calculate-stake-rewards (stake-id uint))
+  (match (map-get? credit-stakes { stake-id: stake-id })
+    stake-info
+    (let
+      (
+        (blocks-staked (- stacks-block-height (get stake-start-block stake-info)))
+        (reward-multiplier (/ (* blocks-staked (var-get reward-rate-basis-points)) u10000))
+      )
+      (/ (* (get amount stake-info) reward-multiplier) u1440)
+    )
+    u0
+  )
+)
+
+(define-read-only (get-stake-info (stake-id uint))
+  (map-get? credit-stakes { stake-id: stake-id })
+)
+
+(define-read-only (get-staker-summary (staker principal))
+  (default-to
+    { total-staked: u0, active-stakes-count: u0, lifetime-rewards: u0 }
+    (map-get? staker-summary { staker: staker })
+  )
+)
+
+(define-read-only (get-total-staked)
+  (var-get total-staked)
+)
+
+(define-read-only (is-stake-unlocked (stake-id uint))
+  (match (map-get? credit-stakes { stake-id: stake-id })
+    stake-info
+    (>= stacks-block-height (+ (get stake-start-block stake-info) (get lock-period-blocks stake-info)))
+    false
   )
 )
